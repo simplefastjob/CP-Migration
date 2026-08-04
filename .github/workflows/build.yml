@@ -18,17 +18,35 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Restore
+      - name: Restore engine
         run: dotnet restore src/CPMigration.Cli/CPMigration.Cli.csproj --disable-parallel
 
-      - name: Build
+      - name: Restore desktop
+        run: dotnet restore src/CPMigration.Desktop/CPMigration.Desktop.csproj --disable-parallel
+
+      - name: Build engine
         run: dotnet build src/CPMigration.Cli/CPMigration.Cli.csproj -c Release --no-restore
 
-      - name: Publish
-        run: dotnet publish src/CPMigration.Cli/CPMigration.Cli.csproj -c Release --no-build -r win-x64 --self-contained false -o artifacts/CPMigration
+      - name: Build desktop
+        run: dotnet build src/CPMigration.Desktop/CPMigration.Desktop.csproj -c Release --no-restore
 
-      - name: Upload artifact
+      - name: Publish engine
+        run: dotnet publish src/CPMigration.Cli/CPMigration.Cli.csproj -c Release --no-build -r win-x64 --self-contained false -o artifacts/CPMigration/engine
+
+      - name: Publish desktop
+        run: dotnet publish src/CPMigration.Desktop/CPMigration.Desktop.csproj -c Release --no-build -r win-x64 --self-contained false -o artifacts/CPMigration
+
+      - name: Include launcher and folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/CPMigration/input | Out-Null
+          New-Item -ItemType Directory -Force -Path artifacts/CPMigration/output | Out-Null
+          Copy-Item EXECUTAR_TUDO.cmd artifacts/CPMigration/EXECUTAR_TUDO.cmd
+          Copy-Item INICIAR_VISUAL.cmd artifacts/CPMigration/INICIAR_VISUAL.cmd
+          Set-Content artifacts/CPMigration/LEIA-ME.txt "Abra CPMigration.exe, selecione a pasta do backup extraido e clique em EXECUTAR TUDO."
+
+      - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: CPMigration-win-x64
+          name: CP-Migration-Studio-win-x64
           path: artifacts/CPMigration
