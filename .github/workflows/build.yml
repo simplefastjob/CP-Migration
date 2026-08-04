@@ -1,0 +1,34 @@
+name: Build .NET
+
+on:
+  push:
+    branches: [ main, feature/base-completa ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore src/CPMigration.Cli/CPMigration.Cli.csproj --disable-parallel
+
+      - name: Build
+        run: dotnet build src/CPMigration.Cli/CPMigration.Cli.csproj -c Release --no-restore
+
+      - name: Publish
+        run: dotnet publish src/CPMigration.Cli/CPMigration.Cli.csproj -c Release --no-build -r win-x64 --self-contained false -o artifacts/CPMigration
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CPMigration-win-x64
+          path: artifacts/CPMigration
