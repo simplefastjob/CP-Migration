@@ -18,8 +18,11 @@ var watch = Stopwatch.StartNew();
 try
 {
     logger.Write(Severity.Info, "PIPELINE_START", "CP Migration iniciado");
-    if (!Directory.EnumerateFiles(input, "*.csv", SearchOption.AllDirectories).Any())
-        throw new InvalidOperationException($"Nenhum CSV encontrado em: {input}");
+    var csvFiles = Directory.EnumerateFiles(input, "*.csv", SearchOption.AllDirectories).ToArray();
+    if (csvFiles.Length == 0) throw new InvalidOperationException($"Nenhum CSV encontrado em: {input}");
+
+    var inputBytes = csvFiles.Sum(path => new FileInfo(path).Length);
+    EnsureInitialFreeSpace(output, Math.Max(5L * 1024 * 1024 * 1024, inputBytes * 2));
 
     var options = new PipelineOptions(input, output);
     var databasePath = Path.Combine(output, "erp_intermediario.sqlite");
@@ -42,7 +45,8 @@ try
     await exporter.ExportAsync(databasePath, tables, migrationPath);
     summary.ExportedTables = tables.Count;
 
-    logger.Write(Severity.Info, "STEP_4", "Consolidando todos os domínios detectados");
+    EnsureInitialFreeSpace(output, 1024L * 1024 * 1024);
+    logger.Write(Severity.Info, "STEP_4", "Consolidando domínios em arquivos compactados, sem repetir dados brutos");
     var consolidator = new DomainConsolidationService(logger);
     var consolidation = await consolidator.ConsolidateAsync(databasePath, tables, relationships, migrationPath);
 
@@ -55,12 +59,7 @@ try
     {
         pipeline = summary,
         consolidation,
-        validation = new
-        {
-            findings = validation.Count,
-            warnings = validation.Count(x => x.Severity == "WARNING"),
-            errors = validation.Count(x => x.Severity == "ERROR")
-        },
+        validation = new { findings = validation.Count, warnings = validation.Count(x => x.Severity == "WARNING"), errors = validation.Count(x => x.Severity == "ERROR") },
         elapsed = watch.Elapsed.ToString(@"hh\:mm\:ss"),
         database = databasePath,
         migration = migrationPath
@@ -72,10 +71,18 @@ try
 }
 catch (Exception ex)
 {
-    logger.Write(Severity.Fatal, "PIPELINE_FATAL", ex.ToString());
+    try { logger.Write(Severity.Fatal, "PIPELINE_FATAL", ex.ToString()); } catch { Console.Error.WriteLine(ex); }
     summary.Issues.Add(new PipelineIssue(Severity.Fatal, "PIPELINE_FATAL", ex.Message));
     summary.FinishedAt = DateTimeOffset.Now;
-    await File.WriteAllTextAsync(Path.Combine(output, "resumo.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
+    try
+    {
+        var emergencyPath = Path.Combine(output, "resumo-erro.json");
+        await File.WriteAllTextAsync(emergencyPath, JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
+    }
+    catch
+    {
+        Console.Error.WriteLine("Não foi possível gravar o resumo do erro, provavelmente por falta de espaço em disco.");
+    }
     Environment.ExitCode = 1;
 }
 
@@ -84,3 +91,13 @@ string? GetArg(string name)
     var index = Array.FindIndex(args, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
     return index >= 0 && index + 1 < args.Length ? Path.GetFullPath(args[index + 1]) : null;
 }
+
+static void EnsureInitialFreeSpace(string outputPath, long requiredBytes)
+{
+    var rootPath = Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? throw new IOException("Não foi possível identificar a unidade de saída.");
+    var drive = new DriveInfo(rootPath);
+    if (drive.AvailableFreeSpace < requiredBytes)
+        throw new IOException($"Espaço insuficiente na unidade {rootPath}. Livre: {ToGb(drive.AvailableFreeSpace):N2} GB; necessário para iniciar/continuar: {ToGb(requiredBytes):N2} GB. Escolha uma pasta de saída em outra unidade ou libere espaço.");
+}
+
+static double ToGb(long bytes) => bytes / 1024d / 1024d / 1024d;
