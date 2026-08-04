@@ -62,7 +62,7 @@ public sealed class SqliteImportService
 
         var parameterNames = reader.Headers.Select((_, i) => $"@p{i}").ToArray();
         var insertSql = $"INSERT INTO {Quote(tableName)} (__SOURCE_ROW,{string.Join(',', reader.Headers.Select(Quote))}) VALUES (@row,{string.Join(',', parameterNames)});";
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = insertSql;
@@ -109,7 +109,7 @@ public sealed class SqliteImportService
 
     private static async Task SaveCatalogAsync(SqliteConnection connection, TableProfile p, CancellationToken ct)
     {
-        await using var tx = await connection.BeginTransactionAsync(ct);
+        await using var tx = (SqliteTransaction)await connection.BeginTransactionAsync(ct);
         await using var table = connection.CreateCommand();
         table.Transaction = tx;
         table.CommandText = "INSERT INTO __CP_TABLES VALUES (@o,@s,@p,@r,@m,@e,@d)";
