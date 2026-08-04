@@ -3,4 +3,7 @@
     <ProjectReference Include="..\CPMigration.Shared\CPMigration.Shared.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="DomainConsolidationService.cs" />
+  </ItemGroup>
 </Project>
