@@ -22,24 +22,41 @@ try
         throw new InvalidOperationException($"Nenhum CSV encontrado em: {input}");
 
     var options = new PipelineOptions(input, output);
+    var databasePath = Path.Combine(output, "erp_intermediario.sqlite");
+
+    logger.Write(Severity.Info, "STEP_1", "Importando todos os CSVs para SQLite");
     var importer = new SqliteImportService(logger);
     var tables = await importer.ImportDirectoryAsync(options);
     summary.ImportedTables = tables.Count;
     summary.ImportedRows = tables.Sum(t => t.RowCount);
 
+    logger.Write(Severity.Info, "STEP_2", "Executando engenharia reversa e descoberta de relacionamentos");
     var reverse = new ReverseEngineeringService(logger);
-    var relationships = await reverse.AnalyzeAsync(Path.Combine(output, "erp_intermediario.sqlite"), tables, output);
+    var relationships = await reverse.AnalyzeAsync(databasePath, tables, output);
     summary.Relationships = relationships.Count;
     summary.Domains = tables.Select(t => t.Domain).Distinct(StringComparer.OrdinalIgnoreCase).Count();
 
     var migrationPath = Path.Combine(output, "Migration");
+    logger.Write(Severity.Info, "STEP_3", "Exportando integralmente todas as tabelas por domínio");
     var exporter = new RawMigrationExporter(logger);
-    await exporter.ExportAsync(Path.Combine(output, "erp_intermediario.sqlite"), tables, migrationPath);
+    await exporter.ExportAsync(databasePath, tables, migrationPath);
     summary.ExportedTables = tables.Count;
-    summary.FinishedAt = DateTimeOffset.Now;
 
-    await File.WriteAllTextAsync(Path.Combine(output, "resumo.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
-    logger.Write(Severity.Info, "PIPELINE_DONE", $"Concluído em {watch.Elapsed:hh\\:mm\\:ss}. Tabelas: {summary.ImportedTables}; registros: {summary.ImportedRows}; relações: {summary.Relationships}");
+    logger.Write(Severity.Info, "STEP_4", "Consolidando todos os domínios detectados");
+    var consolidator = new DomainConsolidationService(logger);
+    var consolidation = await consolidator.ConsolidateAsync(databasePath, tables, relationships, migrationPath);
+
+    summary.FinishedAt = DateTimeOffset.Now;
+    var finalSummary = new
+    {
+        pipeline = summary,
+        consolidation,
+        elapsed = watch.Elapsed.ToString(@"hh\:mm\:ss"),
+        database = databasePath,
+        migration = migrationPath
+    };
+    await File.WriteAllTextAsync(Path.Combine(output, "resumo.json"), JsonSerializer.Serialize(finalSummary, new JsonSerializerOptions { WriteIndented = true }));
+    logger.Write(Severity.Info, "PIPELINE_DONE", $"Concluído em {watch.Elapsed:hh\\:mm\\:ss}. Tabelas: {summary.ImportedTables}; registros: {summary.ImportedRows}; relações: {summary.Relationships}; documentos consolidados: {consolidation.Documents}; revisão: {consolidation.ReviewRecords}");
     Console.WriteLine($"Resultado: {migrationPath}");
     Environment.ExitCode = 0;
 }
