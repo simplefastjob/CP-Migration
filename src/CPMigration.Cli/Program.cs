@@ -46,17 +46,27 @@ try
     var consolidator = new DomainConsolidationService(logger);
     var consolidation = await consolidator.ConsolidateAsync(databasePath, tables, relationships, migrationPath);
 
+    logger.Write(Severity.Info, "STEP_5", "Validando chaves, duplicidades e referências órfãs");
+    var validator = new IntegrityValidationService(logger);
+    var validation = await validator.ValidateAsync(databasePath, tables, relationships, migrationPath);
+
     summary.FinishedAt = DateTimeOffset.Now;
     var finalSummary = new
     {
         pipeline = summary,
         consolidation,
+        validation = new
+        {
+            findings = validation.Count,
+            warnings = validation.Count(x => x.Severity == "WARNING"),
+            errors = validation.Count(x => x.Severity == "ERROR")
+        },
         elapsed = watch.Elapsed.ToString(@"hh\:mm\:ss"),
         database = databasePath,
         migration = migrationPath
     };
     await File.WriteAllTextAsync(Path.Combine(output, "resumo.json"), JsonSerializer.Serialize(finalSummary, new JsonSerializerOptions { WriteIndented = true }));
-    logger.Write(Severity.Info, "PIPELINE_DONE", $"Concluído em {watch.Elapsed:hh\\:mm\\:ss}. Tabelas: {summary.ImportedTables}; registros: {summary.ImportedRows}; relações: {summary.Relationships}; documentos consolidados: {consolidation.Documents}; revisão: {consolidation.ReviewRecords}");
+    logger.Write(Severity.Info, "PIPELINE_DONE", $"Concluído em {watch.Elapsed:hh\\:mm\\:ss}. Tabelas: {summary.ImportedTables}; registros: {summary.ImportedRows}; relações: {summary.Relationships}; documentos consolidados: {consolidation.Documents}; revisão: {consolidation.ReviewRecords}; validações: {validation.Count}");
     Console.WriteLine($"Resultado: {migrationPath}");
     Environment.ExitCode = 0;
 }
