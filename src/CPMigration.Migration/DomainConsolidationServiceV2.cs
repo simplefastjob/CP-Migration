@@ -45,87 +45,144 @@ public sealed class DomainConsolidationService
             var roots = SelectRoots(domainTables, relationships).Take(MaxRootsPerDomain).ToArray();
             var outputPath = Path.Combine(consolidatedDirectory, Sanitize(domain) + ".ndjson.gz");
             var partialPath = outputPath + ".partial";
-            if (File.Exists(partialPath)) File.Delete(partialPath);
 
+            TryDelete(partialPath);
             _logger.Write(Severity.Info, "CONSOLIDATE_DOMAIN", $"{domain}: {domainTables.Length} tabelas; {roots.Length} raízes; saída compactada e sem duplicar registros relacionados", outputPath);
 
             try
             {
-                await using var file = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                await using var gzip = new GZipStream(file, CompressionLevel.Fastest, leaveOpen: false);
-                await using var writer = new StreamWriter(gzip, new UTF8Encoding(false), 1024 * 1024);
+                await WriteDomainFileAsync(
+                    partialPath,
+                    domain,
+                    roots,
+                    tableLookup,
+                    relationships,
+                    connection,
+                    reviewWriter,
+                    summary,
+                    ct);
 
-                foreach (var root in roots)
-                {
-                    await foreach (var source in ReadRowsAsync(connection, root, ct))
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        var key = ResolveBusinessKey(root, source.Data, source.RowNumber);
-                        var references = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-
-                        foreach (var relation in FindRelations(root, relationships))
-                        {
-                            var rootIsParent = relation.ParentTable.Equals(root.OriginalName, StringComparison.OrdinalIgnoreCase);
-                            var relatedName = rootIsParent ? relation.ChildTable : relation.ParentTable;
-                            if (!tableLookup.TryGetValue(relatedName, out var relatedTable)) continue;
-
-                            var rootColumn = rootIsParent ? relation.ParentColumn : relation.ChildColumn;
-                            var relatedColumn = rootIsParent ? relation.ChildColumn : relation.ParentColumn;
-                            if (!source.Data.TryGetValue(rootColumn, out var value) || string.IsNullOrWhiteSpace(value?.ToString())) continue;
-
-                            var refs = await ReadRelatedReferencesAsync(connection, relatedTable, relatedColumn, value!.ToString()!, MaxReferencesPerRelation + 1, ct);
-                            if (refs.Count == 0) continue;
-
-                            var truncated = refs.Count > MaxReferencesPerRelation;
-                            references[relatedTable.OriginalName] = new
-                            {
-                                joinColumn = relatedColumn,
-                                joinValue = value,
-                                confidence = relation.Confidence,
-                                rows = refs.Take(MaxReferencesPerRelation).ToArray(),
-                                truncated
-                            };
-
-                            if (truncated)
-                            {
-                                summary.ReviewRecords++;
-                                await reviewWriter.WriteLineAsync($"{Csv(domain)};{Csv(root.OriginalName)};{source.RowNumber};RELATED_TRUNCATED;{Csv($"{relatedTable.OriginalName} possui mais de {MaxReferencesPerRelation} referências; os dados completos permanecem na exportação bruta")}");
-                            }
-                        }
-
-                        var document = new
-                        {
-                            type = DomainToDocumentType(domain),
-                            sourceId = key,
-                            source = new { table = root.OriginalName, sqliteTable = root.SqliteName, row = source.RowNumber },
-                            domain,
-                            core = NormalizeCore(domain, source.Data),
-                            references,
-                            rawLocation = new { sqliteDatabase = "erp_intermediario.sqlite", table = root.SqliteName, row = source.RowNumber },
-                            validation = new { valid = true, relatedTables = references.Count }
-                        };
-
-                        await writer.WriteLineAsync(JsonSerializer.Serialize(document, JsonOptions));
-                        summary.Documents++;
-                        summary.ByDomain[domain] = summary.ByDomain.GetValueOrDefault(domain) + 1;
-                    }
-                }
-
-                await writer.FlushAsync(ct);
+                ct.ThrowIfCancellationRequested();
                 File.Move(partialPath, outputPath, true);
             }
             catch
             {
-                try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { }
+                TryDelete(partialPath);
                 throw;
             }
         }
 
         await reviewWriter.FlushAsync(ct);
-        await File.WriteAllTextAsync(Path.Combine(consolidatedDirectory, "consolidation-summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }), ct);
-        await File.WriteAllTextAsync(Path.Combine(consolidatedDirectory, "LEIA-ME.txt"),
-            "Os arquivos consolidados usam .ndjson.gz. Eles contêm os dados principais e referências compactas. Os registros completos permanecem nas pastas de exportação bruta e no erp_intermediario.sqlite, evitando duplicação extrema e falta de espaço em disco.", ct);
+        await File.WriteAllTextAsync(
+            Path.Combine(consolidatedDirectory, "consolidation-summary.json"),
+            JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }),
+            ct);
+        await File.WriteAllTextAsync(
+            Path.Combine(consolidatedDirectory, "LEIA-ME.txt"),
+            "Os arquivos consolidados usam .ndjson.gz. Eles contêm os dados principais e referências compactas. Os registros completos permanecem nas pastas de exportação bruta e no erp_intermediario.sqlite, evitando duplicação extrema e falta de espaço em disco.",
+            ct);
+
         return summary;
+    }
+
+    private async Task WriteDomainFileAsync(
+        string partialPath,
+        string domain,
+        IReadOnlyList<TableProfile> roots,
+        IReadOnlyDictionary<string, TableProfile> tableLookup,
+        IReadOnlyList<RelationshipCandidate> relationships,
+        SqliteConnection connection,
+        StreamWriter reviewWriter,
+        ConsolidationSummary summary,
+        CancellationToken ct)
+    {
+        await using (var file = new FileStream(
+            partialPath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan))
+        await using (var gzip = new GZipStream(file, CompressionLevel.Fastest, leaveOpen: false))
+        await using (var writer = new StreamWriter(gzip, new UTF8Encoding(false), 1024 * 1024, leaveOpen: false))
+        {
+            foreach (var root in roots)
+            {
+                await foreach (var source in ReadRowsAsync(connection, root, ct))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var key = ResolveBusinessKey(root, source.Data, source.RowNumber);
+                    var references = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var relation in FindRelations(root, relationships))
+                    {
+                        var rootIsParent = relation.ParentTable.Equals(root.OriginalName, StringComparison.OrdinalIgnoreCase);
+                        var relatedName = rootIsParent ? relation.ChildTable : relation.ParentTable;
+                        if (!tableLookup.TryGetValue(relatedName, out var relatedTable)) continue;
+
+                        var rootColumn = rootIsParent ? relation.ParentColumn : relation.ChildColumn;
+                        var relatedColumn = rootIsParent ? relation.ChildColumn : relation.ParentColumn;
+                        if (!source.Data.TryGetValue(rootColumn, out var value) || string.IsNullOrWhiteSpace(value?.ToString())) continue;
+
+                        var refs = await ReadRelatedReferencesAsync(
+                            connection,
+                            relatedTable,
+                            relatedColumn,
+                            value!.ToString()!,
+                            MaxReferencesPerRelation + 1,
+                            ct);
+                        if (refs.Count == 0) continue;
+
+                        var truncated = refs.Count > MaxReferencesPerRelation;
+                        references[relatedTable.OriginalName] = new
+                        {
+                            joinColumn = relatedColumn,
+                            joinValue = value,
+                            confidence = relation.Confidence,
+                            rows = refs.Take(MaxReferencesPerRelation).ToArray(),
+                            truncated
+                        };
+
+                        if (truncated)
+                        {
+                            summary.ReviewRecords++;
+                            await reviewWriter.WriteLineAsync(
+                                $"{Csv(domain)};{Csv(root.OriginalName)};{source.RowNumber};RELATED_TRUNCATED;{Csv($"{relatedTable.OriginalName} possui mais de {MaxReferencesPerRelation} referências; os dados completos permanecem na exportação bruta")}");
+                        }
+                    }
+
+                    var document = new
+                    {
+                        type = DomainToDocumentType(domain),
+                        sourceId = key,
+                        source = new { table = root.OriginalName, sqliteTable = root.SqliteName, row = source.RowNumber },
+                        domain,
+                        core = NormalizeCore(domain, source.Data),
+                        references,
+                        rawLocation = new { sqliteDatabase = "erp_intermediario.sqlite", table = root.SqliteName, row = source.RowNumber },
+                        validation = new { valid = true, relatedTables = references.Count }
+                    };
+
+                    await writer.WriteLineAsync(JsonSerializer.Serialize(document, JsonOptions));
+                    summary.Documents++;
+                    summary.ByDomain[domain] = summary.ByDomain.GetValueOrDefault(domain) + 1;
+                }
+            }
+
+            await writer.FlushAsync(ct);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+            // Não mascara o erro original do pipeline.
+        }
     }
 
     private static void EnsureFreeSpace(string path, long requiredBytes)
@@ -182,23 +239,64 @@ public sealed class DomainConsolidationService
 
     private static readonly Dictionary<string, string[]> GenericMappings = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["id"] = ["ID", "CODIGO", "CODG_CODIGO"], ["description"] = ["DESCRICAO", "DESC_DESCRICAO", "NOME", "NOME_RAZAO_SOCIAL"], ["status"] = ["STATUS", "SITUACAO", "INDR_ATIVO", "INDR_STATUS"]
+        ["id"] = ["ID", "CODIGO", "CODG_CODIGO"],
+        ["description"] = ["DESCRICAO", "DESC_DESCRICAO", "NOME", "NOME_RAZAO_SOCIAL"],
+        ["status"] = ["STATUS", "SITUACAO", "INDR_ATIVO", "INDR_STATUS"]
     };
 
     private static readonly Dictionary<string, Dictionary<string, string[]>> DomainMappings = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["CLIENTES-ENTIDADES"] = new(StringComparer.OrdinalIgnoreCase) { ["id"] = ["ID", "PARENTD_ID", "CODG_ENTIDADE"], ["name"] = ["NOME_RAZAO_SOCIAL", "NOME", "RAZAO_SOCIAL"], ["tradeName"] = ["NOME_FANTASIA", "FANTASIA"], ["cpfCnpj"] = ["NUMR_CGC", "CPF_CNPJ", "CNPJ", "CPF"], ["email"] = ["NOME_EMAIL", "EMAIL"], ["phone"] = ["FONE_CONTATO", "TELEFONE", "CELULAR"] },
-        ["PRODUTOS-CATALOGO"] = new(StringComparer.OrdinalIgnoreCase) { ["id"] = ["ID", "COMPROD_ID", "PCIPROD_ID"], ["code"] = ["CODG_PRODUTO", "CODIGO", "REFERENCIA"], ["description"] = ["DESC_PRODUTO", "DESCRICAO", "NOME_PRODUTO"], ["brand"] = ["MARCA", "DESC_MARCA"] },
-        ["ESTOQUE-LOGISTICA"] = new(StringComparer.OrdinalIgnoreCase) { ["productId"] = ["COMPROD_ID", "PCIPROD_ID", "PRODUTO_ID"], ["quantity"] = ["QTDE_ESTOQUE", "QUANTIDADE", "SALDO"], ["location"] = ["CODG_LOCACAO", "LOCACAO", "ENDERECO_ESTOQUE"], ["warehouse"] = ["PCIDEPO_ID", "CODG_DEPOSITO", "DEPOSITO"] },
-        ["FINANCEIRO"] = new(StringComparer.OrdinalIgnoreCase) { ["id"] = ["ID", "FINTITU_ID"], ["entityId"] = ["PARENTD_ID", "CLIENTE_ID", "FORNECEDOR_ID"], ["amount"] = ["VALR_TITULO", "VALOR", "VALR_ORIGINAL"], ["dueDate"] = ["DATA_VENCIMENTO", "DTHR_VENCIMENTO"], ["status"] = ["SITUACAO", "INDR_STATUS", "STATUS"] }
+        ["CLIENTES-ENTIDADES"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["id"] = ["ID", "PARENTD_ID", "CODG_ENTIDADE"],
+            ["name"] = ["NOME_RAZAO_SOCIAL", "NOME", "RAZAO_SOCIAL"],
+            ["tradeName"] = ["NOME_FANTASIA", "FANTASIA"],
+            ["cpfCnpj"] = ["NUMR_CGC", "CPF_CNPJ", "CNPJ", "CPF"],
+            ["email"] = ["NOME_EMAIL", "EMAIL"],
+            ["phone"] = ["FONE_CONTATO", "TELEFONE", "CELULAR"]
+        },
+        ["PRODUTOS-CATALOGO"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["id"] = ["ID", "COMPROD_ID", "PCIPROD_ID"],
+            ["code"] = ["CODG_PRODUTO", "CODIGO", "REFERENCIA"],
+            ["description"] = ["DESC_PRODUTO", "DESCRICAO", "NOME_PRODUTO"],
+            ["brand"] = ["MARCA", "DESC_MARCA"]
+        },
+        ["ESTOQUE-LOGISTICA"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["productId"] = ["COMPROD_ID", "PCIPROD_ID", "PRODUTO_ID"],
+            ["quantity"] = ["QTDE_ESTOQUE", "QUANTIDADE", "SALDO"],
+            ["location"] = ["CODG_LOCACAO", "LOCACAO", "ENDERECO_ESTOQUE"],
+            ["warehouse"] = ["PCIDEPO_ID", "CODG_DEPOSITO", "DEPOSITO"]
+        },
+        ["FINANCEIRO"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["id"] = ["ID", "FINTITU_ID"],
+            ["entityId"] = ["PARENTD_ID", "CLIENTE_ID", "FORNECEDOR_ID"],
+            ["amount"] = ["VALR_TITULO", "VALOR", "VALR_ORIGINAL"],
+            ["dueDate"] = ["DATA_VENCIMENTO", "DTHR_VENCIMENTO"],
+            ["status"] = ["SITUACAO", "INDR_STATUS", "STATUS"]
+        }
     };
 
     private static string DomainToDocumentType(string domain) => domain switch
     {
-        "CLIENTES-ENTIDADES" => "entity", "PRODUTOS-CATALOGO" => "product", "ESTOQUE-LOGISTICA" => "stock", "COMPRAS-SUPRIMENTOS" => "purchase", "VENDAS-COMERCIAL" => "sale", "FINANCEIRO" => "financial", "FISCAL-TRIBUTARIO" => "fiscal", "CONTABILIDADE" => "accounting", "GARANTIAS-DEVOLUCOES" => "warranty", _ => "generic"
+        "CLIENTES-ENTIDADES" => "entity",
+        "PRODUTOS-CATALOGO" => "product",
+        "ESTOQUE-LOGISTICA" => "stock",
+        "COMPRAS-SUPRIMENTOS" => "purchase",
+        "VENDAS-COMERCIAL" => "sale",
+        "FINANCEIRO" => "financial",
+        "FISCAL-TRIBUTARIO" => "fiscal",
+        "CONTABILIDADE" => "accounting",
+        "GARANTIAS-DEVOLUCOES" => "warranty",
+        _ => "generic"
     };
 
-    private static async IAsyncEnumerable<SourceRecord> ReadRowsAsync(SqliteConnection connection, TableProfile table, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    private static async IAsyncEnumerable<SourceRecord> ReadRowsAsync(
+        SqliteConnection connection,
+        TableProfile table,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         await using var command = connection.CreateCommand();
         command.CommandText = $"SELECT * FROM {Q(table.SqliteName)}";
@@ -211,7 +309,13 @@ public sealed class DomainConsolidationService
         }
     }
 
-    private static async Task<List<long>> ReadRelatedReferencesAsync(SqliteConnection connection, TableProfile table, string column, string value, int limit, CancellationToken ct)
+    private static async Task<List<long>> ReadRelatedReferencesAsync(
+        SqliteConnection connection,
+        TableProfile table,
+        string column,
+        string value,
+        int limit,
+        CancellationToken ct)
     {
         var result = new List<long>();
         await using var command = connection.CreateCommand();
@@ -219,14 +323,16 @@ public sealed class DomainConsolidationService
         command.Parameters.AddWithValue("@value", value);
         command.Parameters.AddWithValue("@limit", limit);
         await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct)) if (!reader.IsDBNull(0)) result.Add(Convert.ToInt64(reader.GetValue(0)));
+        while (await reader.ReadAsync(ct))
+            if (!reader.IsDBNull(0)) result.Add(Convert.ToInt64(reader.GetValue(0)));
         return result;
     }
 
     private static Dictionary<string, object?> ReadDictionary(SqliteDataReader reader)
     {
         var data = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        for (var i = 0; i < reader.FieldCount; i++) data[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString();
+        for (var i = 0; i < reader.FieldCount; i++)
+            data[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString();
         return data;
     }
 
