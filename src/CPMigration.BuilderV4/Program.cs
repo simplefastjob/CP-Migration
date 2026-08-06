@@ -12,7 +12,8 @@ var modules = new IBuilderModule[]
     new ClienteBuilder(),
     new ProdutoBuilder(),
     new EstoqueBuilder(),
-    new FornecedorBuilder()
+    new FornecedorBuilder(),
+    new FinalizationPreparationBuilder()
 };
 
 var engine = new BuilderEngine(source, output, modules);
