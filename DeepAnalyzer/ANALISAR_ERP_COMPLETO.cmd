@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0\.."
 
 echo ============================================================
-echo CP MIGRATION - DEEP ANALYZER PARTE 1
+echo CP MIGRATION - DEEP ANALYZER COMPLETO
 echo ============================================================
 echo.
 
@@ -24,24 +24,33 @@ if not exist "%DATABASE%" (
   exit /b 1
 )
 
-echo Restaurando dependencias...
+echo [1/2] Restaurando e compilando analise estrutural...
 dotnet restore src\CPMigration.DeepAnalyzer\CPMigration.DeepAnalyzer.csproj --disable-parallel
 if errorlevel 1 goto :erro
-
-echo Compilando...
 dotnet build src\CPMigration.DeepAnalyzer\CPMigration.DeepAnalyzer.csproj -c Release --no-restore
 if errorlevel 1 goto :erro
 
-echo Executando analise profunda...
+echo [1/2] Executando analise estrutural e perfil dos dados...
 dotnet run --project src\CPMigration.DeepAnalyzer\CPMigration.DeepAnalyzer.csproj -c Release --no-build -- --database "%DATABASE%" --output "%OUTPUT%"
 if errorlevel 1 goto :erro
 
 echo.
+echo [2/2] Restaurando e compilando descoberta de relacionamentos...
+dotnet restore src\CPMigration.DeepAnalyzer.Relationships\CPMigration.DeepAnalyzer.Relationships.csproj --disable-parallel
+if errorlevel 1 goto :erro
+dotnet build src\CPMigration.DeepAnalyzer.Relationships\CPMigration.DeepAnalyzer.Relationships.csproj -c Release --no-restore
+if errorlevel 1 goto :erro
+
+echo [2/2] Cruzando chaves, valores e dominios...
+dotnet run --project src\CPMigration.DeepAnalyzer.Relationships\CPMigration.DeepAnalyzer.Relationships.csproj -c Release --no-build -- --database "%DATABASE%" --structure "%OUTPUT%\EstruturaCompleta.json" --output "%OUTPUT%"
+if errorlevel 1 goto :erro
+
+echo.
 echo ============================================================
-echo ANALISE CONCLUIDA
+echo ANALISE COMPLETA CONCLUIDA
 echo Resultado: %OUTPUT%
 echo ============================================================
-start "" "%OUTPUT%\index.html"
+start "" "%OUTPUT%"
 pause
 exit /b 0
 
@@ -51,7 +60,7 @@ echo.
 echo ============================================================
 echo FALHA NA ANALISE
 echo Codigo: %ERR%
-echo Consulte: %OUTPUT%\LOG_COMPLETO.txt
+echo Consulte os logs dentro de: %OUTPUT%
 echo ============================================================
 pause
 exit /b %ERR%
