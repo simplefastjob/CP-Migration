@@ -1,0 +1,25 @@
+{
+  "generatedAt": "2026-08-06T09:13:14.9273268-03:00",
+  "source": "C:\\Users\\Freddy\\Desktop\\Migration\\CP-Migration\\output\\Migration\\CONSOLIDADO",
+  "database": "C:\\Users\\Freddy\\Desktop\\Migration\\CP-Migration\\NovoERP\\NovoERP.sqlite",
+  "documents": 1161002,
+  "mode": "compact-indexed",
+  "byDomain": {
+    "CLIENTES-ENTIDADES": 2500,
+    "COMPRAS-SUPRIMENTOS": 34950,
+    "CONFIGURACOES-PARAMETROS": 3,
+    "CONTABILIDADE": 6,
+    "CRM-ATENDIMENTO": 16234,
+    "ESTOQUE-LOGISTICA": 2815,
+    "FINANCEIRO": 119640,
+    "FISCAL-TRIBUTARIO": 17,
+    "GARANTIAS-DEVOLUCOES": 15,
+    "INTEGRACOES-LOGS": 874273,
+    "NAO_IDENTIFICADO": 3,
+    "PRECOS-CUSTOS": 23,
+    "PRODUTOS-CATALOGO": 3,
+    "SERVICOS-OS": 7825,
+    "USUARIOS-SEGURANCA": 86468,
+    "VENDAS-COMERCIAL": 16227
+  }
+}

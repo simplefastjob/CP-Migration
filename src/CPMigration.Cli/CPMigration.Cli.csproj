@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\CPMigration.Shared\CPMigration.Shared.csproj" />
+    <ProjectReference Include="..\CPMigration.Core\CPMigration.Core.csproj" />
+    <ProjectReference Include="..\CPMigration.ReverseEngineering\CPMigration.ReverseEngineering.csproj" />
+    <ProjectReference Include="..\CPMigration.Migration\CPMigration.Migration.csproj" />
+  </ItemGroup>
+</Project>

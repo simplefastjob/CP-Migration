@@ -1,0 +1,32 @@
+{
+  "source": "DR Solucoes / RRPARTS",
+  "entity": {
+    "rootTables": ["RRPARTS__PAR_ENTIDADES"],
+    "typeTables": ["RRPARTS__PAR_ENTIDADE_TIPO", "RRPARTS__PAR_TIPO_ENTIDADE"],
+    "personTables": ["RRPARTS__PAR_PESSOA_FISICA", "RRPARTS__PAR_PESSOA_JURIDICA"],
+    "documentTables": ["RRPARTS__PAR_DOCUMENTO_ENTIDADE"],
+    "billingTables": ["RRPARTS__PAR_ENTIDADE_FATURAMENTO", "RRPARTS__FIN_CLIENTE_FATURAMENTO"],
+    "supplierTables": ["RRPARTS__PAR_FORN_ENTIDADE", "RRPARTS__PAR_FORN_COMPRA_EMPRESA", "RRPARTS__PAR_COMPRAS_ENTIDADE"],
+    "keyCandidates": ["PARENTD_ID", "ID"]
+  },
+  "product": {
+    "rootTables": ["RRPARTS__COM_PRODUTOS"],
+    "priceTables": ["RRPARTS__COM_PRECO_PRODUTO"],
+    "stockTables": ["RRPARTS__PCI_LOCACAO", "RRPARTS__PCI_LOTE_ALOCACAO", "RRPARTS__PCI_INSUFICIENCIA_ESTOQUE", "RRPARTS__VCI_ESTOQUE"],
+    "locationTables": ["RRPARTS__PCI_LOCACAO", "RRPARTS__PCI_RUA_LOCACAO", "RRPARTS__PCI_PISO_LOCACAO", "RRPARTS__PCI_DEPOSITOS_GERAIS", "RRPARTS__GED_LOCACAO", "RRPARTS__GED_DEPOSITO"],
+    "inventoryTables": ["RRPARTS__PCI_INVENTARIO", "RRPARTS__PCI_CONTAGEM_INVENTARIO", "RRPARTS__PCI_AJUSTE_INVENTARIO"],
+    "keyCandidates": ["COMPROD_ID", "PCIPROD_ID", "PRODUTO_ID", "PROD_ID", "ITEM_ID", "ID"]
+  },
+  "sales": {
+    "tableTerms": ["VENDA", "PEDIDO", "FATURAMENTO", "COMISSAO", "NEGOCIACAO"]
+  },
+  "purchases": {
+    "tableTerms": ["COMPRA", "COTACAO", "ORDEM_COMPRA", "SUPRIMENTO", "RECEBIMENTO"]
+  },
+  "financial": {
+    "tableTerms": ["FIN_", "TITULO", "OCORRENCIA", "BAIXA", "PAGAMENTO", "PORTADOR", "BANCO", "CAIXA", "ANTECIPACAO"]
+  },
+  "fiscal": {
+    "tableTerms": ["NFE", "NOTA_FISCAL", "FISCAL", "CFOP", "NCM", "ICMS", "IPI", "PIS", "COFINS"]
+  }
+}
