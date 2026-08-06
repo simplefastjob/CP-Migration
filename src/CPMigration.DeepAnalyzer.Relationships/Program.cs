@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -25,16 +26,26 @@ try
 
     await using var connection = new SqliteConnection($"Data Source={database};Mode=ReadOnly;Cache=Private;Pooling=False");
     await connection.OpenAsync();
-    await Exec(connection, "PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536;");
+    await Exec(connection, "PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32768;");
 
     var candidates = BuildCandidates(tables);
-    await Log("CANDIDATES", $"Pares candidatos por nome: {candidates.Count:N0}");
+    await Log("CANDIDATES", $"Pares candidatos após filtros de desempenho: {candidates.Count:N0}");
 
     var relationships = new List<RelationshipResult>();
+    var watch = Stopwatch.StartNew();
+    var lastProgress = Stopwatch.StartNew();
+
     for (var i = 0; i < candidates.Count; i++)
     {
         var c = candidates[i];
-        if (i % 100 == 0) Console.WriteLine($"Relacionamentos: {i:N0}/{candidates.Count:N0}");
+        if (i == 0 || i % 10 == 0 || lastProgress.Elapsed >= TimeSpan.FromSeconds(5))
+        {
+            var rate = i == 0 ? 0 : i / Math.Max(1d, watch.Elapsed.TotalSeconds);
+            var remaining = rate <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((candidates.Count - i) / rate);
+            Console.WriteLine($"Relacionamentos: {i:N0}/{candidates.Count:N0} | encontrados: {relationships.Count:N0} | tempo: {watch.Elapsed:hh\\:mm\\:ss} | restante aprox.: {(rate <= 0 ? "calculando" : remaining.ToString("hh\\:mm\\:ss"))}");
+            lastProgress.Restart();
+        }
+
         try
         {
             var result = await TestRelationship(connection, c);
@@ -43,6 +54,10 @@ try
                 relationships.Add(result);
                 await Log("RELATION", $"{result.ChildTable}.{result.ChildColumn} -> {result.ParentTable}.{result.ParentColumn} | confiança {result.Confidence:P0} | cobertura {result.Coverage:P0}");
             }
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is 9 or 5)
+        {
+            await Log("TIMEOUT", $"{c.LeftTable}.{c.LeftColumn} x {c.RightTable}.{c.RightColumn}: consulta ignorada por limite de tempo");
         }
         catch (Exception ex)
         {
@@ -66,12 +81,9 @@ try
     var domainMaps = tables.GroupBy(t => t.SuggestedDomain).ToDictionary(
         g => g.Key,
         g => g.OrderByDescending(t => ranking.First(r => r.Table == t.Name).Score).Take(30).Select(t => new DomainTable(
-            t.Name,
-            t.RowCount,
-            t.DomainConfidence,
+            t.Name, t.RowCount, t.DomainConfidence,
             t.Columns.Where(c => c.SuggestedMeaning != "DESCONHECIDO").Select(c => new FieldCandidate(c.Name, c.SuggestedMeaning, c.MeaningConfidence, c.NonNullCount, c.DistinctCount, c.Examples.Take(5).ToArray())).ToArray(),
-            relationships.Where(r => r.ChildTable == t.Name || r.ParentTable == t.Name).Take(25).ToArray()
-        )).ToArray());
+            relationships.Where(r => r.ChildTable == t.Name || r.ParentTable == t.Name).Take(25).ToArray())).ToArray());
 
     var resultObject = new AnalysisResult(DateTimeOffset.Now, database, tables.Length, relationships.Count, relationships, ranking, domainMaps);
     await File.WriteAllTextAsync(Path.Combine(output, "RelacionamentosDescobertos.json"), JsonSerializer.Serialize(resultObject, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
@@ -79,7 +91,7 @@ try
     await File.WriteAllTextAsync(Path.Combine(output, "MAPEAMENTO_INTELIGENTE.md"), BuildMappingMarkdown(domainMaps, relationships), Encoding.UTF8);
     await File.WriteAllTextAsync(Path.Combine(output, "Relacionamentos.csv"), BuildCsv(relationships), Encoding.UTF8);
 
-    await Log("DONE", $"Relacionamentos aceitos: {relationships.Count:N0}");
+    await Log("DONE", $"Relacionamentos aceitos: {relationships.Count:N0}; candidatos testados: {candidates.Count:N0}; tempo: {watch.Elapsed}");
     Console.WriteLine($"Concluído. Relacionamentos: {relationships.Count:N0}");
 }
 catch (Exception ex)
@@ -93,59 +105,89 @@ List<RelationCandidate> BuildCandidates(TableInfo[] tables)
 {
     var list = new List<RelationCandidate>();
     var byColumn = new Dictionary<string, List<(TableInfo Table, ColumnInfo Column)>>(StringComparer.OrdinalIgnoreCase);
+
     foreach (var table in tables)
     foreach (var column in table.Columns.Where(c => IsKeyLike(c.Name) && c.NonNullCount > 0 && c.DistinctCount > 0))
     {
         var normalized = NormalizeKey(column.Name);
+        if (normalized.Length < 3 || normalized is "ID" or "CODIGO" or "NUMERO" or "CHAVE") continue;
         if (!byColumn.TryGetValue(normalized, out var bucket)) byColumn[normalized] = bucket = [];
         bucket.Add((table, column));
     }
 
-    foreach (var bucket in byColumn.Values)
+    foreach (var bucket in byColumn.Values.Where(b => b.Count is >= 2 and <= 60))
     {
-        foreach (var a in bucket)
-        foreach (var b in bucket)
+        var ordered = bucket.OrderByDescending(x => ParentScore(x.Table.RowCount, x.Column.DistinctCount)).Take(30).ToArray();
+        for (var i = 0; i < ordered.Length; i++)
+        for (var j = i + 1; j < ordered.Length; j++)
         {
-            if (string.Compare(a.Table.Name, b.Table.Name, StringComparison.OrdinalIgnoreCase) >= 0) continue;
-            if (a.Table.RowCount == 0 || b.Table.RowCount == 0) continue;
-            if (Math.Min(a.Column.DistinctCount, b.Column.DistinctCount) == 0) continue;
+            var a = ordered[i];
+            var b = ordered[j];
+            if (!LikelyCompatible(a.Table, b.Table, a.Column, b.Column)) continue;
             list.Add(new RelationCandidate(a.Table.Name, a.Column.Name, a.Table.RowCount, a.Column.DistinctCount, b.Table.Name, b.Column.Name, b.Table.RowCount, b.Column.DistinctCount));
         }
     }
-    return list.OrderByDescending(x => Math.Min(x.LeftDistinct, x.RightDistinct)).Take(120000).ToList();
+
+    return list
+        .DistinctBy(x => $"{x.LeftTable}|{x.LeftColumn}|{x.RightTable}|{x.RightColumn}", StringComparer.OrdinalIgnoreCase)
+        .OrderByDescending(x => CandidateScore(x))
+        .Take(8_000)
+        .ToList();
+}
+
+bool LikelyCompatible(TableInfo a, TableInfo b, ColumnInfo ca, ColumnInfo cb)
+{
+    var ratio = Math.Min(ca.DistinctCount, cb.DistinctCount) / (double)Math.Max(1, Math.Max(ca.DistinctCount, cb.DistinctCount));
+    if (ratio < .0005) return false;
+    if (a.SuggestedDomain == b.SuggestedDomain) return true;
+    var pa = TablePrefix(a.Name);
+    var pb = TablePrefix(b.Name);
+    return pa == pb || ca.Name.Equals(cb.Name, StringComparison.OrdinalIgnoreCase);
+}
+
+double CandidateScore(RelationCandidate c)
+{
+    var distinct = Math.Min(c.LeftDistinct, c.RightDistinct);
+    var balance = distinct / (double)Math.Max(1, Math.Max(c.LeftDistinct, c.RightDistinct));
+    var exact = c.LeftColumn.Equals(c.RightColumn, StringComparison.OrdinalIgnoreCase) ? 500 : 0;
+    return exact + Math.Log10(Math.Max(1, distinct)) * 100 + balance * 100;
 }
 
 async Task<RelationshipResult> TestRelationship(SqliteConnection connection, RelationCandidate c)
 {
-    var leftParentScore = ParentScore(c.LeftRows, c.LeftDistinct);
-    var rightParentScore = ParentScore(c.RightRows, c.RightDistinct);
-    var parentLeft = leftParentScore >= rightParentScore;
+    var parentLeft = ParentScore(c.LeftRows, c.LeftDistinct) >= ParentScore(c.RightRows, c.RightDistinct);
     var parentTable = parentLeft ? c.LeftTable : c.RightTable;
     var parentColumn = parentLeft ? c.LeftColumn : c.RightColumn;
     var childTable = parentLeft ? c.RightTable : c.LeftTable;
     var childColumn = parentLeft ? c.RightColumn : c.LeftColumn;
     var childRows = parentLeft ? c.RightRows : c.LeftRows;
 
-    const int sampleLimit = 5000;
+    const int childLimit = 250;
+    const int parentLimit = 20_000;
     await using var command = connection.CreateCommand();
-    command.CommandTimeout = 120;
+    command.CommandTimeout = 8;
     command.CommandText = $"""
-WITH sample AS (
-  SELECT DISTINCT {Q(childColumn)} AS v
+WITH child_sample(v) AS (
+  SELECT DISTINCT CAST({Q(childColumn)} AS TEXT)
   FROM {Q(childTable)}
   WHERE {Q(childColumn)} IS NOT NULL AND TRIM(CAST({Q(childColumn)} AS TEXT)) <> ''
-  LIMIT {sampleLimit}
+  LIMIT {childLimit}
+),
+parent_sample(v) AS (
+  SELECT DISTINCT CAST({Q(parentColumn)} AS TEXT)
+  FROM {Q(parentTable)}
+  WHERE {Q(parentColumn)} IS NOT NULL AND TRIM(CAST({Q(parentColumn)} AS TEXT)) <> ''
+  LIMIT {parentLimit}
 )
-SELECT COUNT(*) AS sampled,
-       SUM(CASE WHEN EXISTS (SELECT 1 FROM {Q(parentTable)} p WHERE p.{Q(parentColumn)} = sample.v LIMIT 1) THEN 1 ELSE 0 END) AS matched
-FROM sample;
+SELECT COUNT(*), SUM(CASE WHEN p.v IS NOT NULL THEN 1 ELSE 0 END)
+FROM child_sample c LEFT JOIN parent_sample p ON p.v = c.v;
 """;
     await using var reader = await command.ExecuteReaderAsync();
     await reader.ReadAsync();
     var sampled = reader.IsDBNull(0) ? 0 : reader.GetInt64(0);
     var matched = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
     var coverage = sampled == 0 ? 0 : matched / (double)sampled;
-    var nameScore = NormalizeKey(parentColumn).Equals(NormalizeKey(childColumn), StringComparison.OrdinalIgnoreCase) ? 1d : .6d;
+    var nameScore = parentColumn.Equals(childColumn, StringComparison.OrdinalIgnoreCase) ? 1d : .75d;
     var uniqueness = parentLeft ? c.LeftDistinct / (double)Math.Max(1, c.LeftRows) : c.RightDistinct / (double)Math.Max(1, c.RightRows);
     var confidence = Math.Clamp(coverage * .72 + Math.Min(1, uniqueness) * .18 + nameScore * .10, 0, 1);
     return new RelationshipResult(childTable, childColumn, parentTable, parentColumn, sampled, matched, coverage, uniqueness, confidence, childRows);
@@ -155,19 +197,25 @@ double ParentScore(long rows, long distinct) => distinct / (double)Math.Max(1, r
 bool IsKeyLike(string name)
 {
     var n = name.ToUpperInvariant();
-    return n == "ID" || n.EndsWith("_ID") || n.Contains("CODG_") || n.Contains("CODIGO") || n.Contains("NUMR_") || n.Contains("CHAVE");
+    return n.EndsWith("_ID") || n.Contains("CODG_") || n.Contains("CODIGO_") || n.Contains("NUMR_") || n.Contains("CHAVE_");
 }
 string NormalizeKey(string name)
 {
     var n = name.ToUpperInvariant().Replace("__", "_");
-    foreach (var prefix in new[] { "CODG_", "CODIGO_", "NUMR_", "ID_" }) if (n.StartsWith(prefix)) n = n[prefix.Length..];
-    foreach (var suffix in new[] { "_ID", "ID" }) if (n.EndsWith(suffix) && n.Length > suffix.Length) n = n[..^suffix.Length];
+    foreach (var prefix in new[] { "CODG_", "CODIGO_", "NUMR_", "ID_", "CHAVE_" }) if (n.StartsWith(prefix)) n = n[prefix.Length..];
+    if (n.EndsWith("_ID") && n.Length > 3) n = n[..^3];
     return n.Replace("_", "");
+}
+string TablePrefix(string name)
+{
+    var n = name.StartsWith("T_RRPARTS__", StringComparison.OrdinalIgnoreCase) ? name[11..] : name;
+    var i = n.IndexOf('_');
+    return i > 0 ? n[..i].ToUpperInvariant() : n.ToUpperInvariant();
 }
 string Q(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
 string? Arg(string name) { var i = Array.FindIndex(args, x => x.Equals(name, StringComparison.OrdinalIgnoreCase)); return i >= 0 && i + 1 < args.Length ? Path.GetFullPath(args[i + 1]) : null; }
 async Task Exec(SqliteConnection connection, string sql) { await using var c = connection.CreateCommand(); c.CommandText = sql; await c.ExecuteNonQueryAsync(); }
-async Task Log(string code, string message) { var line = $"{DateTimeOffset.Now:O} [{code}] {message}"; await log.WriteLineAsync(line); }
+async Task Log(string code, string message) => await log.WriteLineAsync($"{DateTimeOffset.Now:O} [{code}] {message}");
 
 string BuildRankingMarkdown(List<TableRanking> ranking)
 {
@@ -185,20 +233,10 @@ string BuildMappingMarkdown(Dictionary<string, DomainTable[]> maps, List<Relatio
         sb.AppendLine($"## {domain.Key}\n");
         foreach (var table in domain.Value.Take(20))
         {
-            sb.AppendLine($"### `{table.Table}`\n");
-            sb.AppendLine($"- Registros: **{table.Rows:N0}**");
-            sb.AppendLine($"- Confiança do domínio: **{table.DomainConfidence:P0}**");
-            if (table.Fields.Length > 0)
-            {
-                sb.AppendLine("- Campos candidatos:");
-                foreach (var f in table.Fields.Take(15)) sb.AppendLine($"  - `{f.Column}` → **{f.Meaning}** ({f.Confidence:P0}), preenchidos {f.NonNull:N0}, distintos {f.Distinct:N0}, exemplos: {string.Join(" | ", f.Examples.Take(3))}");
-            }
-            var links = relationships.Where(r => r.ChildTable == table.Table || r.ParentTable == table.Table).Take(12).ToArray();
-            if (links.Length > 0)
-            {
-                sb.AppendLine("- Relacionamentos mais fortes:");
-                foreach (var r in links) sb.AppendLine($"  - `{r.ChildTable}.{r.ChildColumn}` → `{r.ParentTable}.{r.ParentColumn}` — confiança **{r.Confidence:P0}**, cobertura **{r.Coverage:P0}**");
-            }
+            sb.AppendLine($"### `{table.Table}`\n- Registros: **{table.Rows:N0}**\n- Confiança do domínio: **{table.DomainConfidence:P0}**");
+            foreach (var f in table.Fields.Take(15)) sb.AppendLine($"  - `{f.Column}` → **{f.Meaning}** ({f.Confidence:P0}), preenchidos {f.NonNull:N0}, distintos {f.Distinct:N0}");
+            foreach (var r in relationships.Where(r => r.ChildTable == table.Table || r.ParentTable == table.Table).Take(12))
+                sb.AppendLine($"  - `{r.ChildTable}.{r.ChildColumn}` → `{r.ParentTable}.{r.ParentColumn}` — confiança **{r.Confidence:P0}**, cobertura **{r.Coverage:P0}**");
             sb.AppendLine();
         }
     }
