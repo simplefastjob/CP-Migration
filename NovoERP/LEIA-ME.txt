@@ -1,0 +1,1 @@
+NovoERP.sqlite foi criado em modo compacto. O banco contém índices e campos principais normalizados. Os JSON completos continuam preservados nos arquivos .ndjson.gz de origem e podem ser localizados por source_file + source_line, evitando duplicar milhões de documentos dentro do SQLite.
