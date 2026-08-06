@@ -21,10 +21,11 @@ if (File.Exists(partialPath)) File.Delete(partialPath);
 
 long total = 0;
 var domainCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+var databaseBuilt = false;
 
 try
 {
-    await using (var connection = new SqliteConnection($"Data Source={partialPath};Mode=ReadWriteCreate;Cache=Private"))
+    await using (var connection = new SqliteConnection($"Data Source={partialPath};Mode=ReadWriteCreate;Cache=Private;Pooling=False"))
     {
         await connection.OpenAsync();
         await ExecuteAsync(connection, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF; PRAGMA cache_size=-131072;");
@@ -65,12 +66,13 @@ try
             await transaction.CommitAsync();
         }
 
-        await ExecuteAsync(connection, "PRAGMA optimize;");
+        await ExecuteAsync(connection, "PRAGMA optimize; PRAGMA wal_checkpoint(TRUNCATE);");
         await connection.CloseAsync();
     }
 
-    if (File.Exists(databasePath)) File.Delete(databasePath);
-    File.Move(partialPath, databasePath);
+    databaseBuilt = true;
+    SqliteConnection.ClearAllPools();
+    await MoveWithRetryAsync(partialPath, databasePath);
 
     var summary = new
     {
@@ -93,8 +95,38 @@ try
 }
 catch
 {
-    try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { }
+    SqliteConnection.ClearAllPools();
+    if (!databaseBuilt)
+    {
+        try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { }
+    }
+    else
+    {
+        Console.Error.WriteLine($"O banco foi totalmente gerado, mas não pôde ser renomeado. Arquivo preservado em: {partialPath}");
+    }
     throw;
+}
+
+async Task MoveWithRetryAsync(string sourcePath, string destinationPath)
+{
+    Exception? lastError = null;
+    for (var attempt = 1; attempt <= 15; attempt++)
+    {
+        try
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(destinationPath)) File.Delete(destinationPath);
+            File.Move(sourcePath, destinationPath);
+            return;
+        }
+        catch (IOException ex)
+        {
+            lastError = ex;
+            await Task.Delay(500 * attempt);
+        }
+    }
+
+    throw new IOException($"Não foi possível finalizar o banco após várias tentativas. O arquivo completo foi preservado em: {sourcePath}", lastError);
 }
 
 async Task CreateSchemaAsync(SqliteConnection connection)
