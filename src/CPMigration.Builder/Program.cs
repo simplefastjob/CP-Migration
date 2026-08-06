@@ -74,7 +74,7 @@ Console.WriteLine("CONCLUÍDO");
 Console.WriteLine($"Banco: {databasePath}");
 Console.WriteLine($"Registros: {total:N0}");
 
-static async Task CreateSchemaAsync(SqliteConnection connection)
+async Task CreateSchemaAsync(SqliteConnection connection)
 {
     const string sql = """
 CREATE TABLE documents (
@@ -101,7 +101,7 @@ CREATE TABLE fiscal (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT, raw_j
     await ExecuteAsync(connection, sql);
 }
 
-static async Task InsertDocumentAsync(SqliteConnection connection, SqliteTransaction transaction, string domain, string type, string? sourceId, string coreJson, string referencesJson, string sourceJson)
+async Task InsertDocumentAsync(SqliteConnection connection, SqliteTransaction transaction, string domain, string type, string? sourceId, string coreJson, string referencesJson, string sourceJson)
 {
     await using var command = connection.CreateCommand();
     command.Transaction = transaction;
@@ -115,7 +115,7 @@ static async Task InsertDocumentAsync(SqliteConnection connection, SqliteTransac
     await command.ExecuteNonQueryAsync();
 }
 
-static async Task InsertSpecializedAsync(SqliteConnection connection, SqliteTransaction transaction, string type, string? sourceId, string coreJson)
+async Task InsertSpecializedAsync(SqliteConnection connection, SqliteTransaction transaction, string type, string? sourceId, string coreJson)
 {
     using var doc = JsonDocument.Parse(coreJson);
     var core = doc.RootElement;
@@ -153,12 +153,12 @@ static async Task InsertSpecializedAsync(SqliteConnection connection, SqliteTran
     await command.ExecuteNonQueryAsync();
 }
 
-static void Add(SqliteCommand command, string parameter, JsonElement element, string property)
+void Add(SqliteCommand command, string parameter, JsonElement element, string property)
 {
     object value = element.TryGetProperty(property, out var node) && node.ValueKind != JsonValueKind.Null ? node.ToString() : DBNull.Value;
     command.Parameters.AddWithValue(parameter, value);
 }
 
-static string? GetString(JsonElement element, string property) => element.TryGetProperty(property, out var node) && node.ValueKind != JsonValueKind.Null ? node.ToString() : null;
-static async Task ExecuteAsync(SqliteConnection connection, string sql) { await using var command = connection.CreateCommand(); command.CommandText = sql; await command.ExecuteNonQueryAsync(); }
-static string? GetArg(string name) { var index = Array.FindIndex(args, value => value.Equals(name, StringComparison.OrdinalIgnoreCase)); return index >= 0 && index + 1 < args.Length ? Path.GetFullPath(args[index + 1]) : null; }
+string? GetString(JsonElement element, string property) => element.TryGetProperty(property, out var node) && node.ValueKind != JsonValueKind.Null ? node.ToString() : null;
+async Task ExecuteAsync(SqliteConnection connection, string sql) { await using var command = connection.CreateCommand(); command.CommandText = sql; await command.ExecuteNonQueryAsync(); }
+string? GetArg(string name) { var index = Array.FindIndex(args, value => value.Equals(name, StringComparison.OrdinalIgnoreCase)); return index >= 0 && index + 1 < args.Length ? Path.GetFullPath(args[index + 1]) : null; }
